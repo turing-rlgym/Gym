@@ -180,7 +180,7 @@ jobs:
     needs: [Nemo_CICD_Test]
     strategy:
       matrix:
-        flag: [unit-test, e2e]
+        flag: [unit-test]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
