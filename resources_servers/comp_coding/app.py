@@ -17,7 +17,7 @@ import re
 import sys
 from typing import Any, List, Optional, Pattern, Tuple
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -190,17 +190,6 @@ def _extract_text_from_response(response_obj) -> Optional[str]:
 class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-
-        # (optional) a simple health route
-        @app.get("/health")
-        async def health():
-            return {"ok": True, "server": "comp_coding"}
-
-        return app
-
-    # ------------ verifier ------------
     async def verify(self, body: CompCodingVerifyRequest) -> CompCodingVerifyResponse:
         try:
             # Enforce a single source of truth for model output: the Responses API object
