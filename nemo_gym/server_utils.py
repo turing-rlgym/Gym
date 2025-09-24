@@ -22,6 +22,7 @@ from logging import LogRecord, getLogger
 from os import getenv
 from pathlib import Path
 from threading import Thread
+from traceback import print_exc
 from typing import Literal, Optional, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
@@ -31,9 +32,11 @@ import yappi
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, DummyCookieJar, ServerDisconnectedError, TCPConnector
 from aiohttp.client import _RequestOptions
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from requests.exceptions import ConnectionError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import PARENT_DIR
@@ -324,6 +327,32 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
+    def setup_exception_middleware(self, app: FastAPI) -> None:
+        @app.exception_handler(StarletteHTTPException)
+        async def http_exception_handler(exc: StarletteHTTPException):
+            print(exc.detail)
+            print(
+                "🚨 Caught an exception printed above. Right now, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+            )
+            return JSONResponse(content=exc.detail, status_code=exc.status_code)
+
+        @app.middleware("http")
+        async def exception_handling_middleware(request: Request, call_next):
+            try:
+                return await call_next(request)
+            except Exception as e:
+                print_exc()
+                print(
+                    "🚨 Caught an exception printed above. Right now, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                )
+                return JSONResponse(content=repr(e), status_code=500)
+            except:
+                print_exc()
+                print(
+                    "🚨 Caught an unknown exception printed above. Right now, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"
+                )
+                return JSONResponse(content="An unknown error occurred", status_code=500)
+
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = Path(PARENT_DIR) / profiling_config.profiling_results_dirpath
         server_profile_path = (base_profile_dir / self.get_session_middleware_key()).with_suffix(".log")
@@ -390,6 +419,8 @@ class SimpleServer(BaseServer):
         server = cls(config=server_config, server_client=server_client)
 
         app = server.setup_webserver()
+
+        server.setup_exception_middleware(app)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
