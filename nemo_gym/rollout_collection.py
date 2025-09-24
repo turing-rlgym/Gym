@@ -69,6 +69,9 @@ class RolloutCollectionHelper(BaseModel):  # pragma: no cover
             f"The tqdm progress bar will only update every {tqdm_miniters} samples that finish to ensure that you are not being spammed."
         )
 
+        if config.responses_create_params:
+            print(f"Overriding responses_create_params fields with {config.responses_create_params}")
+
         metrics = Counter()
         with open(config.output_jsonl_fpath, "a") as f:
 
