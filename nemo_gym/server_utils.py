@@ -380,7 +380,7 @@ class SimpleServer(BaseServer):
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            yappi.set_clock_type("WALL")
+            yappi.set_clock_type("CPU")
             yappi.start()
             print(f"🔍 Enabled profiling for {self.config.name}")
 
