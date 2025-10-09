@@ -28,6 +28,26 @@ parallel_reasoning_simple_agent:
           version: 0.0.1
           artifact_fpath: dapo17k_bytedtsinghua_train.jsonl
         license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
+      num_parallelizer: 2
+      num_executor: 8
+      keep_executor_prompt: false
+      parallel_type: planner
+      use_reducer: false
+      mix_raw_executor: true
+library_judge_math_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: library_judge_math
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/library_judge_math/data/aime24_bytedtsinghua_validation.jsonl
@@ -36,17 +56,4 @@ parallel_reasoning_simple_agent:
           version: 0.0.1
           artifact_fpath: aime24_bytedtsinghua_validation.jsonl
         license: Apache 2.0
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/library_judge_math/data/example.jsonl
-      num_parallelizer: 4
-      num_executor: 4
-      num_reducer: 8
-      executor_max_output_tokens: 32768
-      parallel_type: planner
-      keep_executor_prompt: true
-      use_reducer: true
-      reducer_type: genselect
-      reduce_across: all
-      return_reducer_only: false
-      mix_raw_executor: false
+

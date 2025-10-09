@@ -16,6 +16,7 @@ import json
 import logging
 from enum import StrEnum
 from typing import Any, List, Literal, Optional
+import uuid
 
 from fastapi import Request, Response
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -58,6 +59,7 @@ class ParallelReasoningConfig(BaseResponsesAPIAgentConfig):
     return_reducer_only: bool = False
     reducer_type: Literal["genselect"] = "genselect"
     reduce_across: Literal["all"] = "all"
+    mix_raw_executor: bool = False
 
 
 class ParallelReasoningRunRequest(BaseRunRequest):
@@ -116,7 +118,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         # Configure the parallel reasoning logger
         logger = logging.getLogger("parallel_reasoning")
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
         logger.addHandler(rich_handler)
@@ -230,6 +232,7 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
         self.logger.debug("[bold cyan]🔄 Starting parallel reasoning process[/bold cyan]")
 
         body = body.model_copy(deep=True)
+        this_request_uuid = str(uuid.uuid4())
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -337,6 +340,33 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
                 executor_response_obj.metadata = {
                     "parallelizer_resp_id": parallelizer_response.id,
                     "stage": Stage.EXECUTOR.value,
+                    "this_request_uuid": this_request_uuid,
+                }
+            except ValidationError as e:
+                raise RuntimeError(
+                    f"Received an invalid response from model server: {json.dumps(await executor_response.json())}"
+                ) from e
+
+            return executor_response_obj, executor_cookies
+        
+        async def get_raw_executor_response(parallelizer_cookies: dict):
+            executor_body = body.model_copy(deep=True)
+            if self.config.executor_max_output_tokens is not None:
+                executor_body.max_output_tokens = self.config.executor_max_output_tokens
+
+            executor_response = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path="/v1/responses",
+                json=executor_body,
+                cookies=parallelizer_cookies,
+            )
+            executor_cookies = executor_response.cookies
+            try:
+                executor_response_obj: NeMoGymResponse = NeMoGymResponse.model_validate(await executor_response.json())
+                executor_response_obj.metadata = {
+                    "parallelizer_resp_id": "__no_parallelizer__",
+                    "stage": Stage.EXECUTOR.value,
+                    "this_request_uuid": this_request_uuid,
                 }
             except ValidationError as e:
                 raise RuntimeError(
@@ -347,12 +377,21 @@ class ParallelReasoning(SimpleResponsesAPIAgent):
 
         # Create all executor tasks
         executor_tasks = []
-        for parallelizer_response in parallelizer_responses:
-            for _ in range(num_executor):
+        if not self.config.mix_raw_executor:
+            for parallelizer_response in parallelizer_responses:
+                for _ in range(num_executor):
+                    executor_tasks.append(get_executor_response(parallelizer_response, all_parallelizer_cookies))
+        else:
+            for parallelizer_response in parallelizer_responses:
                 executor_tasks.append(get_executor_response(parallelizer_response, all_parallelizer_cookies))
+            self.logger.debug(f"[orange3]🔄 Running {len(parallelizer_responses)} post parallelizer executor requests concurrently[/orange3]")
+            num_raw_executions = num_parallelizer * num_executor - len(parallelizer_responses)
+            self.logger.debug(f"[orange3]🔄 Running {num_raw_executions} raw executor requests concurrently[/orange3]")
+            for _ in range(num_raw_executions):
+                executor_tasks.append(get_raw_executor_response(all_parallelizer_cookies))
 
         total_executors = len(executor_tasks)
-        self.logger.debug(f"[orange3]🔄 Running {total_executors} executor requests concurrently[/orange3]")
+        self.logger.debug(f"[orange3]🔄 Running total {total_executors} executor requests concurrently[/orange3]")
 
         # Run all executor tasks concurrently
         executor_results = await asyncio.gather(*executor_tasks)
