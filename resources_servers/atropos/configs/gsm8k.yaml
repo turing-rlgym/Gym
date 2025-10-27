@@ -5,16 +5,12 @@ gsm8k_atropos_resources_server:
       domain: agent
 
       atropos_path: /raid/home/cmunley/Gym/atropos
-
       environment_module: environments.gsm8k_server
       environment_class: GSM8kEnv
 
-      trajectory_api_port: 9999
-      trajectory_api_url: http://localhost:9999
-
       group_size: 8
 
-      env_args:
+      env_kwargs:
         use_wandb: false
 
 gsm8k_atropos_agent:

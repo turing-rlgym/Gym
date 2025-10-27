@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""fetches scored trajectories from trajectory API"""
-
 import time
 from fastapi import Request
 from pydantic import Field
