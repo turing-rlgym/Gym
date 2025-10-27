@@ -3,7 +3,6 @@
 [Atropos](https://github.com/NousResearch/atropos) 
 
 
-**3. Run Gym:**
 ```bash
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 resources_servers/atropos/configs/gsm8k.yaml"
