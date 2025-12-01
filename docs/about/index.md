@@ -11,6 +11,6 @@ orphan: true
 
 Three components work together to generate and evaluate agent interactions:
 
-- **Agents**: Orchestrate multi-turn interactions between models and resources. Handle conversation flow, tool routing, and response formatting.
-- **Models**: LLM inference endpoints (OpenAI-compatible or vLLM). Handle single-turn text generation and tool-calling decisions.
-- **Resources**: Provide tools (functions agents call) + verifiers (logic to score performance). Examples: math environments, code sandboxes, web search.
+- **Agents**: Orchestrate multi-turn interactions between models and resources, handling conversation flow, tool routing, and response formatting.
+- **Models**: LLM inference endpoints (OpenAI-compatible or vLLM) that handle single-turn text generation and tool-calling decisions.
+- **Resources**: Provide tools (functions agents call) and verifiers (logic to score performance). Examples include math environments, code sandboxes, and web search.

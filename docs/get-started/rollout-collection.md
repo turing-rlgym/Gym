@@ -1,6 +1,6 @@
 # Rollout Collection
 
-A rollout is complete record of a task instance execution that captures:
+A rollout is a complete record of a task instance execution that captures:
 - What the model was asked to do (input)
 - How the model reasoned (internal processing)  
 - What tools were used (tool calls and tool responses)
