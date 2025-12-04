@@ -14,8 +14,10 @@
 import json
 from os import environ
 from pathlib import Path
+from typing import Optional
 
 import yaml
+from datasets import load_dataset
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import HfHubHTTPError
 from scripts.update_resource_servers import visit_resource_server
@@ -52,6 +54,22 @@ def check_jsonl_format(file_path: str) -> bool:  # pragma: no cover
         return False
 
     return True
+
+
+def download_parquet_dataset_as_jsonl(
+    repo_id: str,
+    output_fpath: str,
+    split: str = "train",
+    token: Optional[str] = None,
+) -> None:
+    """Download a HF dataset and save as JSONL"""
+    try:
+        ds = load_dataset(repo_id, split=split, token=token)
+        ds.to_json(output_fpath)
+        print(f"[Nemo-Gym] - Downloaded and converted dataset to: {output_fpath}")
+    except Exception as e:
+        print(f"[Nemo-Gym] - Error downloading/converting dataset: {e}")
+        raise
 
 
 def upload_jsonl_dataset(

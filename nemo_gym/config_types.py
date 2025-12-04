@@ -149,6 +149,7 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
 class JsonlDatasetHuggingFaceIdentifer(BaseModel):
     repo_id: str
     artifact_fpath: Optional[str] = None
+    split: str = "train"
 
 
 class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):

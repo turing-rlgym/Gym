@@ -44,7 +44,12 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
-from nemo_gym.hf_utils import download_jsonl_dataset as download_jsonl_dataset_from_hf
+from nemo_gym.hf_utils import (
+    download_jsonl_dataset as download_jsonl_dataset_from_hf,
+)
+from nemo_gym.hf_utils import (
+    download_parquet_dataset_as_jsonl,
+)
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -476,26 +481,26 @@ class TrainDataProcessor(BaseModel):
                             continue
 
                         if d.huggingface_identifier.artifact_fpath is None:
-                            print(f"""
-Dataset `{d.name}` has no artifact_fpath in huggingface_identifier.
-NeMo Gym only supports JSONL files. Please ensure the HuggingFace repo
-contains a JSONL file and specify its path in artifact_fpath, or download
-and convert the dataset to JSONL format locally.
-""")
-                            continue
-
-                        download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
-                            {
-                                "repo_id": d.huggingface_identifier.repo_id,
-                                "artifact_fpath": d.huggingface_identifier.artifact_fpath,
-                                "output_fpath": d.jsonl_fpath,
-                                "hf_token": global_config["hf_token"],
-                            }
-                        )
-                        print(
-                            f"Downloading dataset `{d.name}` for `{server_name}` from {backend}: {d.huggingface_identifier.repo_id}"
-                        )
-                        download_jsonl_dataset_from_hf(download_config)
+                            print(f"Downloading parquet dataset `{d.name}` from {d.huggingface_identifier.repo_id}...")
+                            download_parquet_dataset_as_jsonl(
+                                repo_id=d.huggingface_identifier.repo_id,
+                                output_fpath=d.jsonl_fpath,
+                                split="train",
+                                token=global_config.get("hf_token"),
+                            )
+                        else:
+                            download_config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(
+                                {
+                                    "repo_id": d.huggingface_identifier.repo_id,
+                                    "artifact_fpath": d.huggingface_identifier.artifact_fpath,
+                                    "output_fpath": d.jsonl_fpath,
+                                    "hf_token": global_config["hf_token"],
+                                }
+                            )
+                            print(
+                                f"Downloading dataset `{d.name}` for `{server_name}` from {backend}: {d.huggingface_identifier.repo_id}"
+                            )
+                            download_jsonl_dataset_from_hf(download_config)
 
                 except Exception as e:
                     print(f"Failed to download dataset `{d.name}` from {backend}: {e}")
