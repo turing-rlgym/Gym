@@ -794,15 +794,11 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
             )
 
     elif backend == "huggingface":
-        required = ["hf_token", "hf_organization", "hf_collection_slug"]
-        missing = [k for k in required if k not in global_config or not global_config[k]]
-        if missing:
+        if "hf_token" not in global_config or not global_config["hf_token"]:
             return False, (
                 f"HuggingFace backend selected but missing credentials: {missing}\n"
                 f"Add to env.yaml:\n"
                 f"  hf_token: <your_hf_token>\n"
-                f"  hf_organization: <your_org>\n"
-                f"  hf_collection_slug: <your_collection_slug>"
             )
 
     return True, ""
