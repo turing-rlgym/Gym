@@ -42,6 +42,7 @@ from nemo_gym import PARENT_DIR, __version__
 from nemo_gym.cli_setup_command import run_command, setup_env_command
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
+    DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
@@ -211,7 +212,10 @@ class RunHelper:  # pragma: no cover
             sleep(3)
 
         print("Waiting for servers to spin up")
-        self.wait_for_spinup()
+        if global_config_dict[DRY_RUN_KEY_NAME]:
+            self.wait_for_dry_run_spinup()
+        else:
+            self.wait_for_spinup()
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -253,6 +257,18 @@ Process `{process_name}` stderr:
 {proc_err}"""
 
                 raise RuntimeError(print_str)
+
+    def wait_for_dry_run_spinup(self) -> None:
+        sleep_interval = 3
+
+        remaining_processes = list(self._processes.values())
+        while remaining_processes:
+            for i in reversed(range(len(remaining_processes))):
+                process = remaining_processes[i]
+                if process.poll() is not None:
+                    remaining_processes.pop(i)
+
+            sleep(sleep_interval)
 
     def wait_for_spinup(self) -> None:
         sleep_interval = 3
@@ -305,6 +321,10 @@ Process `{process_name}` stderr:
         print("NeMo Gym finished!")
 
     def run_forever(self) -> None:
+        if self._server_client.global_config_dict[DRY_RUN_KEY_NAME]:
+            self.shutdown()
+            return
+
         async def sleep():
             # Indefinitely
             while True:
@@ -444,7 +464,8 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 
 def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:  # pragma: no cover
     # Eventually we may want more sophisticated testing here, but this is sufficient for now.
-    command = f"""{setup_env_command(test_config.dir_path, global_config_dict, test_config.entrypoint)} && pytest"""
+    prefix = test_config.entrypoint.replace("/", "\\/")
+    command = f"""{setup_env_command(test_config.dir_path, global_config_dict, prefix)} && pytest"""
     return run_command(command, test_config.dir_path)
 
 
