@@ -28,7 +28,6 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
-from pydantic_core import ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
