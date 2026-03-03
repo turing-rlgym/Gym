@@ -29,7 +29,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    JudgeTruncationConfigMixin,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -41,7 +40,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_response_json
 
 
-class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig, JudgeTruncationConfigMixin):
+class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
@@ -251,22 +250,6 @@ Example output: "My final verdict is different [[A!=B]]"."""
     ) -> tuple[bool, JudgeEvaluation]:
         config = self.config
         responses_create_params = config.judge_responses_create_params.model_copy(deep=True)
-
-        # Truncate answers if they would exceed the judge model's context window.
-        if getattr(config, "max_judge_input_tokens", None) is not None:
-            cpt = getattr(config, "chars_per_token_estimate", 3.5)
-            scaffold = self.JUDGE_PROMPT_TEMPLATE.format(question=question, first_answer="", second_answer="")
-            overhead_chars = len(self.JUDGE_SYSTEM_MESSAGE) + len(scaffold)
-            overhead_tokens_est = overhead_chars / cpt
-            budget_chars = int((config.max_judge_input_tokens - overhead_tokens_est) * cpt)
-            if budget_chars >= 100 and (len(first_answer) + len(second_answer)) > budget_chars:
-                total = len(first_answer) + len(second_answer)
-                first_answer = first_answer[: int(budget_chars * len(first_answer) / total)]
-                second_answer = second_answer[: int(budget_chars * len(second_answer) / total)]
-                if first_answer and not first_answer.endswith("\n"):
-                    first_answer += "\n... [truncated]"
-                if second_answer and not second_answer.endswith("\n"):
-                    second_answer += "\n... [truncated]"
 
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
             question=question, first_answer=first_answer, second_answer=second_answer
