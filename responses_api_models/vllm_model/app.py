@@ -149,7 +149,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if message["role"] == "developer":
                     message["role"] = "system"
 
-        body_dict = body.model_dump(exclude_unset=True)
+        body_dict = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
         body_dict["model"] = self.config.model
 
         if self.config.chat_template_kwargs:
@@ -446,9 +446,20 @@ class VLLMConverter(BaseModel):
             for tool_dict in tools:
                 tool_dict = tool_dict.copy()
                 tool_dict.pop("type", None)
+                tool_dict.pop("strict", None)
                 responses_create_params["tools"].append(
                     NeMoGymChatCompletionToolParam(type="function", function=NeMoGymFunctionDefinition(**tool_dict))
                 )
+
+        # Strip Responses-API-only fields that are not valid Chat Completions
+        # parameters. Some backends (e.g. NVIDIA NIM) strictly reject unknown
+        # fields even when their values are None.
+        _RESPONSES_API_ONLY_KEYS = {
+            "background", "include", "instructions", "previous_response_id",
+            "prompt", "text", "truncation",
+        }
+        for key in _RESPONSES_API_ONLY_KEYS:
+            responses_create_params.pop(key, None)
 
         chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
             messages=state.messages,
