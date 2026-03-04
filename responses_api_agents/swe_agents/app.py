@@ -15,6 +15,7 @@ import asyncio
 import glob
 import json
 import os
+import random
 import re
 import shlex
 import shutil
@@ -24,7 +25,7 @@ import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
 from contextlib import contextmanager
-from fcntl import LOCK_EX, LOCK_UN, flock
+
 from pathlib import Path
 from shutil import rmtree
 from subprocess import Popen
@@ -39,6 +40,7 @@ from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -61,6 +63,21 @@ from responses_api_models.vllm_model.app import VLLMConverter, split_responses_i
 ########################################
 # START Configuration
 ########################################
+
+
+class AgentPromptOverride(BaseModel):
+    user_prompt_template: Optional[str] = Field(
+        default=None,
+        description="Path to the user prompt template file",
+    )
+    system_prompt_template: Optional[str] = Field(
+        default=None,
+        description="Path to the system prompt template file",
+    )
+    agent_cls: Literal["CodeActAgent", "OpenCodeAgent", "CodexAgent", "Terminus2Agent"] = Field(
+        default="CodeActAgent",
+        description="Class to use for the agent",
+    )
 
 
 class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -100,6 +117,18 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     dataset_path: Optional[str] = Field(
         default=None,
         description="Path to the dataset for SWE-bench evaluation",
+    )
+
+    agent_prompt_overrides: Optional[list[AgentPromptOverride]] = Field(
+        default=None,
+        description="List of (user_prompt_template, system_prompt_template, agent_cls) overrides. "
+        "If multiple are provided, one is selected per instance_id (deterministic or random based on "
+        "agent_prompt_override_random).",
+    )
+    agent_prompt_override_random: bool = Field(
+        default=False,
+        description="If True, randomly select from agent_prompt_overrides each run. "
+        "If False (default), selection is deterministic per instance_id.",
     )
 
     openhands_should_log: bool = False
@@ -148,6 +177,11 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     base_mounted_dir: Path
     profiling_dir: Path
     profiling_mounted_dir: Path
+
+    # Resolved prompt override fields (selected from agent_prompt_overrides based on instance_id)
+    resolved_user_prompt_template: Optional[str] = None
+    resolved_system_prompt_template: Optional[str] = None
+    resolved_agent_cls: str = "CodeActAgent"
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -205,19 +239,41 @@ class BaseDatasetHarnessProcessor(BaseModel):
 
     @contextmanager
     def _setup_directory_lock(self, setup_dir: Path, label: str):
-        """File-based lock to ensure only one process performs the setup."""
+        """Cross-node lock using mkdir (atomic on Lustre/NFS, unlike fcntl.flock)."""
         lock_dir = setup_dir.parent
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / f".{setup_dir.name}.lock"
+        lock_path = lock_dir / f".{setup_dir.name}.lockdir"
 
-        with open(lock_path, "w") as lock_file:
-            if self.config.debug:
-                print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
-            flock(lock_file, LOCK_EX)
+        print(f"Acquiring {label} setup lock at {lock_path}", flush=True)
+        max_wait = 1800
+        poll_interval = 5
+        waited = 0
+        while True:
             try:
-                yield
-            finally:
-                flock(lock_file, LOCK_UN)
+                lock_path.mkdir(exist_ok=False)
+                break
+            except FileExistsError:
+                stale_threshold = 3600
+                try:
+                    lock_age = time.time() - lock_path.stat().st_mtime
+                    if lock_age > stale_threshold:
+                        print(f"  Lock appears stale ({lock_age:.0f}s old), breaking it", flush=True)
+                        shutil.rmtree(lock_path, ignore_errors=True)
+                        continue
+                except OSError:
+                    pass
+                if waited >= max_wait:
+                    raise TimeoutError(f"Timed out waiting for {label} setup lock after {max_wait}s")
+                if waited % 30 == 0:
+                    print(
+                        f"  Waiting for {label} setup lock (held by another process, {waited}s elapsed)...", flush=True
+                    )
+                time.sleep(poll_interval)
+                waited += poll_interval
+        try:
+            yield
+        finally:
+            shutil.rmtree(lock_path, ignore_errors=True)
 
     # Setup method is sync for now since there's been no need to concurrently set up
     def setup(self) -> Path:
@@ -305,7 +361,7 @@ SWEBENCH_COMMIT={swebench_commit} \\
 
 class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
-        eval_harness_repo = "https://github.com/ludwig-n/R2E-Gym.git"
+        eval_harness_repo = "https://github.com/sdevare-nv/nv-R2E-Gym.git"
         eval_harness_commit = "local-eval"
 
         setup_dir = self.parent_dir / "swe_r2e_gym_setup"
@@ -620,7 +676,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{log_cmd}"
             f"{profiling_cmd}"
-            f"export NEMO_GYM_METRICS_FPATH={self.config.metrics_fpath} && "
+            f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
             f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
@@ -649,7 +705,7 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
             f"./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    llm.model "  # name of llm config section in config.toml
             f"    {self.config.agent_framework_commit} "  # openhands commit
-            f"    CodeActAgent "  # agent
+            f"    {self.config.resolved_agent_cls} "  # agent
             f"    0 "  # Note: this is eval limit which randomly chooses an instance from the dataset
             f"    {self.config.agent_max_turns} "  # max agent iterations
             f"    1 "  # number of workers
@@ -882,17 +938,20 @@ class RunOpenHandsAgent(BaseModel):
 
         # Dump out dot and png files from profiling on OpenHands level
         if self.config.debug:
-            profiling_name = "openhands"
-            callgrind_path = self.config.profiling_dir / f"{profiling_name}.callgrind"
-            callgrind_dotfile_path = self.config.profiling_dir / f"{profiling_name}.dot"
-            callgrind_graph_path = self.config.profiling_dir / f"{profiling_name}.png"
+            try:
+                profiling_name = "openhands"
+                callgrind_path = self.config.profiling_dir / f"{profiling_name}.callgrind"
+                callgrind_dotfile_path = self.config.profiling_dir / f"{profiling_name}.dot"
+                callgrind_graph_path = self.config.profiling_dir / f"{profiling_name}.png"
 
-            gprof2dot_main(
-                argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
-            )
+                gprof2dot_main(
+                    argv=f"--format=callgrind --output={callgrind_dotfile_path} -e 5 -n 5 {callgrind_path}".split()
+                )
 
-            (graph,) = graph_from_dot_file(callgrind_dotfile_path)
-            graph.write_png(callgrind_graph_path)
+                (graph,) = graph_from_dot_file(callgrind_dotfile_path)
+                graph.write_png(callgrind_graph_path)
+            except Exception as e:
+                print(f"Error dumping profiling files: {e}", flush=True)
 
         if not patch:
             metrics.patch_exists = False
@@ -1121,6 +1180,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             ]
         )
 
+        if params.resolved_user_prompt_template:
+            mount_args.append(
+                f"--mount type=bind,src={params.resolved_user_prompt_template},dst=/openhands_setup/OpenHands/user_prompt.j2"
+            )
+        if params.resolved_system_prompt_template:
+            mount_args.append(
+                f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt.j2"
+            )
+            mount_args.append(
+                f"--mount type=bind,src={params.resolved_system_prompt_template},dst=/openhands_setup/OpenHands/system_prompt_long_horizon.j2"
+            )
+
         miniforge3_path = Path(params.openhands_setup_dir) / "miniforge3"
         mount_args.append(f"--mount type=bind,src={miniforge3_path},dst=/openhands_setup/miniforge3,ro")
         mount_args.append(f"--mount type=bind,src={miniforge3_path},dst={miniforge3_path},ro")
@@ -1185,6 +1256,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             apptainer_cmd = f"ulimit -v {memory_limit_kb} && {apptainer_cmd}"
 
         return apptainer_cmd
+
+    def _resolve_absolute_path(self, path: Optional[str]) -> Optional[str]:
+        if not path:
+            return None
+        p = Path(path)
+        if p.is_absolute():
+            return str(p)
+        return str(PARENT_DIR / p)
 
     def _setup_params(
         self, body: NeMoGymResponseCreateParamsNonStreaming
@@ -1270,6 +1349,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
         params.metrics_fpath.write_text("{}")
+
+        if params.agent_prompt_overrides:
+            overrides = params.agent_prompt_overrides
+            if params.agent_prompt_override_random:
+                selected = random.choice(overrides)
+            else:
+                rng = random.Random(instance_id)
+                selected = rng.choice(overrides)
+
+            params.resolved_user_prompt_template = self._resolve_absolute_path(selected.user_prompt_template)
+            params.resolved_system_prompt_template = self._resolve_absolute_path(selected.system_prompt_template)
+            params.resolved_agent_cls = selected.agent_cls
 
         if params.problem_info["dataset_name"] == "nv-internal-1":
             dataset_processor = NVInternalDatasetProcessor(config=params)
