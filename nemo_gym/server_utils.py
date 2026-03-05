@@ -365,12 +365,17 @@ def initialize_ray() -> None:
     Note: This function will modify the global config dict - update `ray_head_node_address`
     """
 
-    if ray.is_initialized():
-        print("Ray already initialized")
-        return
-
     global_config_dict = get_global_config_dict()
     ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
+
+    if ray.is_initialized():
+        print("Ray already initialized")
+        if not ray_head_node_address:
+            with open_dict(global_config_dict):
+                global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
+            print(f"Set ray_head_node_address from existing cluster: {global_config_dict['ray_head_node_address']}")
+        return
+
     ray_namespace = global_config_dict.get(RAY_NAMESPACE_KEY_NAME, None)
     ray_init_kwargs = dict(ignore_reinit_error=True)
 
