@@ -19,7 +19,6 @@ from time import sleep
 from typing import Dict, List, Optional
 
 import ray
-import ray.util.state
 from ray.actor import ActorClass, ActorProxy
 from ray.util.scheduling_strategies import (
     NodeAffinitySchedulingStrategy,
@@ -103,14 +102,20 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
 
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: allow gpus = {allowed_gpu_nodes}", flush=True)
 
-        head = self.cfg["ray_head_node_address"]
-        node_states = ray.util.state.list_nodes(head, detail=True, limit=10000)
+        # Use ray.nodes() (GCS-based) instead of ray.util.state.list_nodes() (dashboard-based).
+        # The State API tries to connect to the Ray dashboard on localhost:8265, which fails when
+        # this actor is scheduled on a non-head node or when the dashboard is unreachable from
+        # within the Gym venv. ray.nodes() works from any node without requiring the dashboard.
+        node_states = ray.nodes()
         for state in node_states:
-            assert state.node_id is not None
-            avail_num_gpus = state.resources_total.get("GPU", 0)
-            if allowed_gpu_nodes is not None and state.node_id not in allowed_gpu_nodes:
+            if not state.get("Alive", False):
                 continue
-            self.avail_gpus_dict[state.node_id] += avail_num_gpus
+            node_id = state["NodeID"]
+            assert node_id is not None
+            avail_num_gpus = state.get("Resources", {}).get("GPU", 0)
+            if allowed_gpu_nodes is not None and node_id not in allowed_gpu_nodes:
+                continue
+            self.avail_gpus_dict[node_id] += avail_num_gpus
 
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: avail gpus = {self.avail_gpus_dict} (intermediate)", flush=True)
 
@@ -162,12 +167,11 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
 
 
 def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:  # pragma: no cover
-    cfg = get_global_config_dict()
-    head = cfg["ray_head_node_address"]
     id_to_ip = {}
-    node_states = ray.util.state.list_nodes(head, limit=10000)
+    node_states = ray.nodes()
     for state in node_states:
-        id_to_ip[state.node_id] = state.node_ip
+        if state.get("Alive", False):
+            id_to_ip[state["NodeID"]] = state["NodeManagerAddress"]
     return id_to_ip
 
 
