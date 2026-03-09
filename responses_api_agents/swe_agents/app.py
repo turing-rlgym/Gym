@@ -139,7 +139,7 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         "If False (default), selection is deterministic per instance_id.",
     )
 
-    openhands_should_log: bool = True
+    openhands_should_log: bool = False
     debug: bool = False
 
 
@@ -149,6 +149,7 @@ class SWEBenchWrapperServerConfig(BaseModel):
     openhands_setup_dir: Path
     swebench_setup_dir: Path
     r2e_gym_setup_dir: Path
+    swe_rebench_setup_dir: Path
     run_session_id: str
     base_results_dir: Path
 
@@ -592,6 +593,190 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         return required_tests <= passed_tests
 
 
+class SWERebenchDatasetProcessor(BaseDatasetHarnessProcessor):
+    def setup(self) -> Path:
+        setup_dir = self.parent_dir / "swe_rebench_setup"
+
+        with self._setup_directory_lock(setup_dir, "SWE-rebench"):
+            rebench_dir = setup_dir / "SWE-rebench-V2"
+
+            if rebench_dir.exists() and (rebench_dir / "agent" / "log_parsers.py").exists():
+                print(f"SWE-rebench-V2 already set up at {setup_dir}", flush=True)
+                return setup_dir
+
+            print(f"Setting up SWE-rebench-V2 environment at {setup_dir}...", flush=True)
+            setup_dir.mkdir(parents=True, exist_ok=True)
+
+            script_fpath = self.parent_dir / "setup_scripts/swe_rebench.sh"
+            command = f"""SETUP_DIR={setup_dir} \
+REBENCH_DIR={rebench_dir} \
+    {script_fpath}"""
+            self._run_setup_command(command)
+
+            return setup_dir
+
+    @staticmethod
+    def _normalize_test_name(name: str) -> str:
+        _REBENCH_TIMING_NORMALIZE_RES = [
+            re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]\s*$", re.IGNORECASE),
+            re.compile(r"\s+in\s+\d+(?:\.\d+)?\s+(?:msec|sec)\b", re.IGNORECASE),
+            re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)\s*$", re.IGNORECASE),
+        ]
+        for pattern in _REBENCH_TIMING_NORMALIZE_RES:
+            name = pattern.sub("", name)
+        return name.strip()
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        install_config = instance_dict.get("install_config", {})
+        test_cmds = install_config.get("test_cmd", [])
+        if isinstance(test_cmds, str):
+            test_cmds = [test_cmds]
+        install_cmds = install_config.get("install", [])
+        if isinstance(install_cmds, str):
+            install_cmds = [install_cmds]
+        log_parser_name = install_config.get("log_parser", "")
+
+        repo = instance_dict.get("repo", "")
+        repo_name = repo.split("/")[1] if "/" in repo else repo
+
+        test_patch = instance_dict.get("test_patch", "")
+        test_patch_path = self.config.persistent_dir / "test_patch.diff"
+        test_patch_path.write_text(test_patch)
+
+        fail_to_pass = instance_dict.get("FAIL_TO_PASS", [])
+        pass_to_pass = instance_dict.get("PASS_TO_PASS", [])
+        if isinstance(fail_to_pass, str):
+            fail_to_pass = json.loads(fail_to_pass)
+        if isinstance(pass_to_pass, str):
+            pass_to_pass = json.loads(pass_to_pass)
+
+        # Write test metadata to files to avoid exceeding OS argument length limits
+        eval_meta_dir = self.config.persistent_dir / "eval_meta"
+        eval_meta_dir.mkdir(parents=True, exist_ok=True)
+        # Pre-normalize all expected test names so the in-container eval script
+        # can compare directly without duplicating the normalization regexes.
+        norm_fail_to_pass = sorted(self._normalize_test_name(n) for n in fail_to_pass)
+        norm_pass_to_pass = sorted(self._normalize_test_name(n) for n in pass_to_pass)
+        (eval_meta_dir / "expected_passed.json").write_text(
+            json.dumps(sorted(set(norm_fail_to_pass + norm_pass_to_pass)))
+        )
+        (eval_meta_dir / "fail_to_pass.json").write_text(json.dumps(norm_fail_to_pass))
+        (eval_meta_dir / "pass_to_pass.json").write_text(json.dumps(norm_pass_to_pass))
+
+        install_block = "\n".join(install_cmds) if install_cmds else ""
+        test_block = "\n".join(test_cmds)
+
+        cmd = f"""#!/bin/bash
+set -e
+
+date +\"%s.%N\" > {self.config.final_eval_apptainer_spinup_timestamp_mounted_fpath}
+
+{self._get_command_sleep_until_predictions_file()}
+
+cd /{repo_name}
+git reset --hard HEAD
+
+# Apply model patch
+git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/patch.diff || true
+
+# Apply test patch
+git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/test_patch.diff || true
+
+# Run install commands (non-fatal, some may fail harmlessly)
+set +e
+{install_block}
+set -e
+
+# Run tests and capture output
+set +e
+(
+{test_block}
+) > /root/test_output.log 2>&1
+TEST_EXIT=$?
+set -e
+
+# Parse results and write report using inline Python
+# NOTE: fail_to_pass.json and pass_to_pass.json are pre-normalized on the host
+# side (via _normalize_test_name), so only parsed test output needs normalizing.
+python3 -c '
+import sys, json, os, re
+sys.path.insert(0, "/swe_rebench_setup/SWE-rebench-V2")
+sys.path.insert(0, "/swe_rebench_setup/SWE-rebench-V2/lib")
+from agent import log_parsers
+
+TIMING_RES = [
+    re.compile(r"\\s*\\[\\s*\\d+(?:\\.\\d+)?\\s*(?:ms|s)\\s*\\]\\s*$", re.IGNORECASE),
+    re.compile(r"\\s+in\\s+\\d+(?:\\.\\d+)?\\s+(?:msec|sec)\\b", re.IGNORECASE),
+    re.compile(r"\\s*\\(\\s*\\d+(?:\\.\\d+)?\\s*(?:ms|s)\\s*\\)\\s*$", re.IGNORECASE),
+]
+
+def normalize(name):
+    for p in TIMING_RES:
+        name = p.sub("", name)
+    return name.strip()
+
+log_parser_name = {json.dumps(log_parser_name)}
+parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
+if parser is None:
+    print(f"Unknown log parser: {{log_parser_name}}", file=sys.stderr)
+    sys.exit(1)
+
+with open("/root/test_output.log") as f:
+    output = f.read()
+
+parsed = parser(output)
+parsed = {{normalize(k): v for k, v in parsed.items()}}
+passed = sorted(k for k, v in parsed.items() if v == "PASSED")
+
+with open("/eval_meta/expected_passed.json") as f:
+    expected_passed = json.load(f)
+with open("/eval_meta/fail_to_pass.json") as f:
+    fail_to_pass = json.load(f)
+with open("/eval_meta/pass_to_pass.json") as f:
+    pass_to_pass = json.load(f)
+
+# fail_to_pass and pass_to_pass are already normalized; only compare.
+passed_set = set(passed)
+fail_to_pass_set = set(fail_to_pass)
+pass_to_pass_set = set(pass_to_pass)
+
+from_fail_to_pass = sorted(passed_set & fail_to_pass_set)
+failed_from_pass_to_pass = sorted(pass_to_pass_set - passed_set)
+resolved = (fail_to_pass_set <= passed_set) and (pass_to_pass_set <= passed_set)
+
+instance_id = {json.dumps(self.config.instance_id)}
+report = {{
+    instance_id: {{
+        "resolved": resolved,
+        "patch_exists": True,
+        "patch_successfully_applied": True,
+        "from_fail_to_pass": from_fail_to_pass,
+        "failed_from_pass_to_pass": failed_from_pass_to_pass,
+        "passed_match": passed == expected_passed,
+    }}
+}}
+
+os.makedirs("/trajectories_mount/eval_results", exist_ok=True)
+with open("/trajectories_mount/eval_results/report.json", "w") as f:
+    json.dump(report, f, indent=2)
+'
+"""
+
+        search_path = os.path.join(
+            self.config.persistent_dir,
+            "eval_results",
+            "report.json",
+        )
+
+        return ExecuteContainerCommandArgs(
+            command=cmd,
+            expected_file_pattern=search_path,
+            mode="eval",
+            timeout=self.config.swebench_tests_timeout,
+        )
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
         setup_dir = self.parent_dir / "swe_openhands_setup"
@@ -688,13 +873,22 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         else:
             camel_case_tool_names_cmd = ""
 
+        # SWE-rebench-V2 and nv-internal-1 containers have /workspace baked in;
+        # the agent works in /{repo_name} or /app, so skip the safety check.
+        if "SWE-rebench" in data_point["dataset_name"] or data_point["dataset_name"] == "nv-internal-1":
+            workspace_check_cmd = ""
+        else:
+            workspace_check_cmd = (
+                "if [ -d /workspace ]; then "
+                "    echo 'Exiting because /workspace is mounted.' && "
+                "    echo 'Please make sure /workspace is not mounted inside of Apptainer before running OpenHands.' && "
+                "    echo 'This is because OpenHands DELETES EVERYTHING in the /workspace folder if it exists.' && "
+                "    exit 1; "
+                "fi && "
+            )
+
         agent_main_cmd = (
-            "if [ -d /workspace ]; then "
-            "    echo 'Exiting because /workspace is mounted.' && "
-            "    echo 'Please make sure /workspace is not mounted inside of Apptainer before running OpenHands.' && "
-            "    echo 'This is because OpenHands DELETES EVERYTHING in the /workspace folder if it exists.' && "
-            "    exit 1; "
-            "fi && "
+            f"{workspace_check_cmd}"
             # Add miniforge bin to PATH (for tmux, node, poetry, etc.)
             "mkdir -p /tmp/ && "
             "export PATH=/openhands_setup/miniforge3/bin:$PATH && "
@@ -920,6 +1114,12 @@ class RunOpenHandsAgent(BaseModel):
                 f"found {len(pred_files)}."
             )
 
+    async def _kill_active_command(self, active_command: ActiveContainerCommand) -> None:
+        if active_command.process.returncode is None:
+            active_command.process.kill()
+            await active_command.process.wait()
+        active_command.log_file.close()
+
     async def process_single_datapoint(self) -> Optional[Path]:
         instance_id = self.config.instance_id
         if self.config.debug:
@@ -939,8 +1139,25 @@ class RunOpenHandsAgent(BaseModel):
             self.config.eval_command, self.config.eval_apptainer_command_str
         )
 
-        out_file_in_eval = await self._finish_container_command(openhands_active_command, self.config.agent_command)
-        out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
+        try:
+            out_file_in_eval = await self._finish_container_command(
+                openhands_active_command, self.config.agent_command
+            )
+            out_file = self._openhands_dir_copy_from_host(output_file_path=out_file_in_eval)
+        except Exception as e:
+            print(f"Agent command failed for {instance_id}: {e}", flush=True)
+            try:
+                self._openhands_dir_copy_from_host(output_file_path=None)
+            except Exception:
+                pass
+            await self._kill_active_command(eval_active_command)
+            metrics.openhands_run_time += time.time()
+            metrics.patch_exists = False
+            metrics.final_eval_apptainer_spinup_time = None
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            if self.config.debug:
+                profiler.stop()
+            return None
 
         generation_apptainer_spinup_timestamp = float(
             self.config.generation_apptainer_spinup_timestamp_fpath.read_text()
@@ -989,7 +1206,7 @@ class RunOpenHandsAgent(BaseModel):
             metrics.patch_exists = False
             metrics.final_eval_apptainer_spinup_time = None
 
-            eval_active_command.process.kill()
+            await self._kill_active_command(eval_active_command)
 
             update_metrics(self.config.metrics_fpath, metrics.model_dump())
             return
@@ -998,7 +1215,16 @@ class RunOpenHandsAgent(BaseModel):
             f.write(patch)
 
         metrics.final_eval_time = -time.time()
-        report_file = await self._finish_container_command(eval_active_command, self.config.eval_command)
+        try:
+            report_file = await self._finish_container_command(eval_active_command, self.config.eval_command)
+        except Exception as e:
+            print(f"Eval command failed for {instance_id}: {e}", flush=True)
+            metrics.final_eval_time += time.time()
+            metrics.patch_exists = True
+            update_metrics(self.config.metrics_fpath, metrics.model_dump())
+            if self.config.debug:
+                profiler.stop()
+            return None
 
         final_eval_apptainer_spinup_timestamp = float(
             self.config.final_eval_apptainer_spinup_timestamp_fpath.read_text()
@@ -1044,6 +1270,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             openhands_setup_dir=OpenHandsHarnessProcessor(config=self.config).setup(),
             swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
             r2e_gym_setup_dir=R2EGymDatasetProcessor(config=self.config).setup(),
+            swe_rebench_setup_dir=SWERebenchDatasetProcessor(config=self.config).setup(),
         )
 
         self._sem = Semaphore(self.config.concurrency)
@@ -1114,6 +1341,26 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if isinstance(container_formatters, str):
             container_formatters = [container_formatters]
+
+        if "SWE-rebench" in data_point["dataset_name"]:
+            instance_id_modified = instance_id.replace("__", "-")
+            last_dash = instance_id_modified.rfind("-")
+            if last_dash != -1:
+                sif_prefix = instance_id_modified[:last_dash] + ":" + instance_id_modified[last_dash + 1 :]
+            else:
+                sif_prefix = instance_id_modified
+
+            for container_formatter in container_formatters:
+                container_path = container_formatter.format(instance_id=instance_id)
+                if os.path.exists(container_path):
+                    return container_path
+                container_dir = os.path.dirname(container_formatter.format(instance_id="dummy"))
+                matches = glob.glob(os.path.join(container_dir, f"{sif_prefix}-*.sif"))
+                if matches:
+                    return matches[0]
+            raise FileNotFoundError(
+                f"No SIF found for SWE-rebench instance {instance_id}. Looked for prefix: {sif_prefix}-*.sif"
+            )
 
         if "R2E-Gym" in data_point["dataset_name"]:
             instance_id_modified = re.sub(
@@ -1187,26 +1434,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             f"--mount type=bind,src={params.persistent_dir},dst=/trajectories_mount",
         ]
 
-        # Add OpenHands setup directory mount if available (for OpenHands)
-        # Mount the entire setup directory at both /openhands_setup and its original absolute path
-        # This is needed because poetry and other tools have hardcoded absolute paths
-        mount_args.append(f"--mount type=bind,src={params.openhands_setup_dir},dst=/openhands_setup,ro")
-        mount_args.append(f"--mount type=bind,src={params.openhands_setup_dir},dst={params.openhands_setup_dir},ro")
-        # Mount only the venv and miniforge as read-only to prevent mutation while keeping the rest writable
-        venv_path = Path(params.openhands_setup_dir) / "OpenHands/.venv"
-        mount_args.append(f"--mount type=bind,src={venv_path},dst=/openhands_setup/OpenHands/.venv,ro")
-        mount_args.append(f"--mount type=bind,src={venv_path},dst={venv_path},ro")
-
+        openhands_dir = f"{params.openhands_setup_dir}/OpenHands"
         mount_args.extend(
             [
-                # make everything in OpenHands read-only
-                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands,dst=/openhands_setup/OpenHands,ro",
-                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/.eval_sessions,dst={params.openhands_setup_dir}/OpenHands/.eval_sessions",
-                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/logs,dst=/openhands_setup/OpenHands/logs",
-                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/logs,dst={params.openhands_setup_dir}/OpenHands/logs",
-                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
-                f"--mount type=bind,src={params.openhands_setup_dir}/OpenHands/evaluation/oh,dst={params.openhands_setup_dir}/OpenHands/evaluation/oh",
+                # Read-only base mounts (parent first)
+                f"--mount type=bind,src={openhands_dir},dst=/openhands_setup/OpenHands,ro",
+                f"--mount type=bind,src={openhands_dir},dst={openhands_dir},ro",
+                f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst=/openhands_setup/OpenHands/.eval_sessions",
+                f"--mount type=bind,src={openhands_dir}/.eval_sessions,dst={openhands_dir}/.eval_sessions",
+                f"--mount type=bind,src={openhands_dir}/logs,dst=/openhands_setup/OpenHands/logs",
+                f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
+                f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
+                f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
                 # Data
                 f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
             ]
@@ -1238,19 +1477,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # )
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst=/swebench_setup")
             mount_args.append(f"--mount type=bind,src={params.swebench_setup_dir},dst={params.swebench_setup_dir}")
-            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
 
         if command.mode == "eval" and data_point["dataset_name"] == "nv-internal-1":
             run_script_path = params.persistent_dir / "run_script.sh"
             parsing_script_path = params.persistent_dir / "parsing_script.py"
-            model_patch_path = params.persistent_dir / "patch.diff"
 
-            # Write here since we are mounting it
-            model_patch_path.write_text("")
+            # Placeholder needed: eval container starts before agent writes the patch
+            params.model_patch_path.write_text("")
 
             mount_args.append(f"--mount type=bind,src={run_script_path},dst=/root/run_script.sh")
             mount_args.append(f"--mount type=bind,src={parsing_script_path},dst=/root/parsing_script.py")
-            mount_args.append(f"--mount type=bind,src={model_patch_path},dst=/root/patch.diff")
+            mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
         if command.mode == "eval" and "R2E-Gym" in data_point["dataset_name"]:
             # Mount the entire setup directory at both /r2egym_setup and its original absolute path
@@ -1258,7 +1495,29 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # print(f"Mounting R2E-Gym setup directory from: {self.r2e_gym_setup_dir}", flush=True)
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst=/r2egym_setup")
             mount_args.append(f"--mount type=bind,src={params.r2e_gym_setup_dir},dst={params.r2e_gym_setup_dir}")
-            mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
+
+        if command.mode == "eval" and "SWE-rebench" in data_point["dataset_name"]:
+            rebench_setup_dir = params.swe_rebench_setup_dir
+            mount_args.append(f"--mount type=bind,src={rebench_setup_dir},dst=/swe_rebench_setup,ro")
+
+            test_patch_path = params.persistent_dir / "test_patch.diff"
+            # model_patch_path placeholder needed: eval container starts before agent writes the patch
+            if not params.model_patch_path.exists():
+                params.model_patch_path.write_text("")
+            mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/root/test_patch.diff")
+            mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
+
+            # Mount eval metadata files explicitly (directory bind mounts may not expose subdirs on Lustre)
+            eval_meta_dir = params.persistent_dir / "eval_meta"
+            mount_args.append(
+                f"--mount type=bind,src={eval_meta_dir / 'expected_passed.json'},dst=/eval_meta/expected_passed.json,ro"
+            )
+            mount_args.append(
+                f"--mount type=bind,src={eval_meta_dir / 'fail_to_pass.json'},dst=/eval_meta/fail_to_pass.json,ro"
+            )
+            mount_args.append(
+                f"--mount type=bind,src={eval_meta_dir / 'pass_to_pass.json'},dst=/eval_meta/pass_to_pass.json,ro"
+            )
 
         if command.mode == "agent" and "R2E-Gym" in data_point["dataset_name"]:
             # Remove R2E-Gym test-related files.
@@ -1274,13 +1533,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         container_commands.append(command.command)
         combined_command = " && ".join(container_commands)
 
+        script_dir = params.persistent_dir / "container_scripts"
+        script_dir.mkdir(parents=True, exist_ok=True)
+        script_path = script_dir / f"{command.mode}_script.sh"
+        script_path.write_text(combined_command)
+        container_script_path = f"/container_scripts/{command.mode}_script.sh"
+        mount_args.append(f"--mount type=bind,src={script_path},dst={container_script_path},ro")
+
         mount_str = " ".join(mount_args)
 
-        # Launch Apptainer container and execute the command
+        env_args = ""
+        if "SWE-rebench" in data_point["dataset_name"]:
+            env_args = "--env _JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false "
+
+        # Launch Apptainer container and execute the script file
         apptainer_cmd = (
             f"apptainer exec --writable-tmpfs --cleanenv --pid --no-mount home,tmp,bind-paths "
+            f"{env_args}"
             f"{mount_str} "
-            f" {params.container} bash -c {shlex.quote(combined_command)}"
+            f" {params.container} bash {container_script_path}"
         )
         memory_limit_mb = params.apptainer_memory_limit_mb
         if memory_limit_mb is not None and memory_limit_mb > 0:
@@ -1397,6 +1668,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if params.problem_info["dataset_name"] == "nv-internal-1":
             dataset_processor = NVInternalDatasetProcessor(config=params)
+        elif "SWE-rebench" in params.problem_info["dataset_name"]:
+            dataset_processor = SWERebenchDatasetProcessor(config=params)
         elif "R2E-Gym" in params.problem_info["dataset_name"]:
             dataset_processor = R2EGymDatasetProcessor(config=params)
         else:
