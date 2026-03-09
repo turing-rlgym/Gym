@@ -15,8 +15,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Any, Literal, Optional
+
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ConfigDict
 
@@ -67,9 +71,6 @@ class XSTestVerifyResponse(BaseVerifyResponse):
     cleaned_response: str
     judge_evaluations: Optional[list[JudgeEvaluation]] = None
 
-
-# Pattern to match orphaned opening <think>/<thinking> tags (no closing tag present)
-_ORPHANED_THINK_OPEN = re.compile(r"<think(?:ing)?\s*/?>", re.IGNORECASE)
 
 # Refusal prefixes from the XSTest paper (Rottger et al., NAACL 2024)
 _REFUSAL_PREFIXES: tuple[str, ...] = (
@@ -131,31 +132,6 @@ def _extract_last_user_text(params: NeMoGymResponseCreateParamsNonStreaming) -> 
     return ""
 
 
-def _strip_thinking_blocks(text: str) -> str:
-    """Remove thinking traces from model output, keeping only the actual response.
-
-    Handles three cases:
-    1. </think> or </thinking> present — split on it, take everything after the last occurrence
-    2. Orphaned <think>/<thinking> tag with no closing — strip the tag, keep remaining text
-    3. No thinking tags at all — return as-is (non-thinking model or already processed)
-
-    Note: In NeMo-Gym, the vllm_model server consumes reasoning_content from vLLM and wraps
-    it in <think> tags inside content. So we detect thinking traces via </think> in content,
-    which is functionally equivalent to checking reasoning_content in non-Gym setups.
-    """
-    # Check for closing tag (most reliable indicator of thinking traces)
-    for closing_tag in ("</thinking>", "</think>"):
-        idx = text.rfind(closing_tag)
-        if idx != -1:
-            return text[idx + len(closing_tag) :].strip()
-
-    # No closing tag — check for orphaned opening tag
-    if _ORPHANED_THINK_OPEN.search(text):
-        return _ORPHANED_THINK_OPEN.sub("", text).strip()
-
-    return text.strip()
-
-
 def _is_refusal(text: str) -> bool:
     """Classify a response as refusal using prefix-based string matching.
 
@@ -173,7 +149,7 @@ def _parse_judge_verdict(text: str) -> Optional[str]:
 
     Returns the verdict label if unambiguous, None if unparseable.
     """
-    cleaned = _strip_thinking_blocks(text).lower().strip()
+    cleaned = text.lower().strip()
     if not cleaned:
         return None
 
@@ -229,7 +205,13 @@ class XSTestResourcesServer(SimpleResourcesServer):
         prompt_type = metadata.get("type", "unknown")
 
         raw_text = _extract_last_assistant_text(body)
-        cleaned_text = _strip_thinking_blocks(raw_text)
+        cleaned_text = raw_text.strip()
+
+        if "</think>" in cleaned_text or "</thinking>" in cleaned_text:
+            logger.warning(
+                "Response contains </think> tags — the model server's reasoning parser may not be enabled. "
+                "Enable it to separate reasoning traces from response content."
+            )
 
         judge_evaluations: Optional[list[JudgeEvaluation]] = None
 
