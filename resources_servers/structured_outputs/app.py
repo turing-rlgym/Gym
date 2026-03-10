@@ -45,6 +45,11 @@ class StructuredOutputsVerifyRequest(BaseVerifyRequest):
     schema_type: SchemaType
 
 
+class StructuredOutputsVerifyResponse(BaseVerifyResponse):
+    schema_str: str
+    schema_type: SchemaType
+
+
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
     config: StructuredOutputsResourcesServerConfig
 
@@ -52,7 +57,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         return app
 
-    async def verify(self, body: StructuredOutputsVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: StructuredOutputsVerifyRequest) -> StructuredOutputsVerifyResponse:
         schema_type = body.schema_type
         schema_str = body.schema_str
 
@@ -73,7 +78,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         response_text = "".join(assistant_responses)
 
         reward = self.evaluate_structured_output_response(schema_type, schema_str, response_text)
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        return StructuredOutputsVerifyResponse(**body.model_dump(), reward=reward)
 
     # ----- Helpers ----- #
     def parse_content(self, schema_type: SchemaType, content: str):
@@ -104,6 +109,10 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         parsed data alongside the schema and converts values where possible.
         On conversion failure the original value is returned so that schema
         validation can report the error.
+
+        Note: markdown-wrapped output (```xml ... ```) is intentionally NOT stripped
+        here. The SDG instructions explicitly tell the model to output raw XML
+        without markdown fencing, so wrapping in backticks is a model error.
         """
         if not isinstance(schema, dict) or "type" not in schema:
             return data
@@ -122,9 +131,24 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
         if schema_type == "array":
             items_schema = schema.get("items", {})
+            # xmltodict represents repeated child elements as {"tagName": [values]},
+            # e.g. <skills><string>a</string><string>b</string></skills> becomes
+            # {"string": ["a", "b"]}. For single elements, xmltodict gives
+            # {"string": "python"} instead of a list. In both cases, unwrap the
+            # single-key dict since we're at an array schema position -- a dict here
+            # is always the xmltodict wrapping artifact, not a meaningful structure.
+            if isinstance(data, dict) and len(data) == 1:
+                data = next(iter(data.values()))
             if not isinstance(data, list):
                 data = [data] if data is not None else []
             return [self.coerce_xml_types(item, items_schema) for item in data]
+
+        # xmltodict returns None for empty tags like <field/> or <field></field>.
+        # Coerce to "" only for string types (parity with JSON/YAML where "" is valid).
+        # Non-string types (integer, boolean, etc.) intentionally left as None so
+        # they fail validation -- 0 and False are meaningful values, not "empty".
+        if data is None and schema_type == "string":
+            return ""
 
         if isinstance(data, str):
             try:
