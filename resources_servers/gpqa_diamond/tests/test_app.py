@@ -32,16 +32,15 @@ class TestApp:
             server_client=MagicMock(spec=ServerClient),
         )
 
-        # Strict mode should reject an unboxed answer.
-        unboxed_response = NeMoGymResponse(
-            id="resp_unboxed",
+        answer_response = NeMoGymResponse(
+            id="resp_answer",
             created_at=0.0,
             model="dummy",
             object="response",
             output=[
                 {
-                    "id": "msg_unboxed",
-                    "content": [{"annotations": [], "text": "Final answer: C", "type": "output_text"}],
+                    "id": "msg_answer",
+                    "content": [{"annotations": [], "text": "Reasoning...\nAnswer: C", "type": "output_text"}],
                     "role": "assistant",
                     "status": "completed",
                     "type": "message",
@@ -58,27 +57,28 @@ class TestApp:
                     {
                         "role": "user",
                         "content": (
-                            "You should output your final response letter inside \\boxed{} and nothing else "
+                            "The last line should be of the format 'Answer: LETTER'. "
                             "Question?\nA: optA\nB: optB\nC: optC\nD: optD"
                         ),
                     }
                 ]
             },
-            response=unboxed_response,
+            response=answer_response,
             options=[{"A": "optA"}, {"B": "optB"}, {"C": "optC"}, {"D": "optD"}],
             expected_answer="C",
             grading_mode="strict_single_letter_boxed",
         )
-        result_unboxed = await server.verify(verify_request)
-        assert result_unboxed.reward == 0.0
+        result_answer = await server.verify(verify_request)
+        assert result_answer.reward == 1.0
+        assert result_answer.extracted_answer == "C"
 
-        boxed_response = unboxed_response.model_copy(
+        boxed_response = answer_response.model_copy(
             update={
                 "id": "resp_boxed",
                 "output": [
                     {
                         "id": "msg_boxed",
-                        "content": [{"annotations": [], "text": "Final: \\boxed{C}", "type": "output_text"}],
+                        "content": [{"annotations": [], "text": "Final: \\boxed{the answer is C}", "type": "output_text"}],
                         "role": "assistant",
                         "status": "completed",
                         "type": "message",
@@ -91,3 +91,40 @@ class TestApp:
 
         assert result_boxed.reward == 1.0
         assert result_boxed.extracted_answer == "C"
+
+    async def test_verify_gpqa_diamond_rejects_invalid_letter(self) -> None:
+        server = GPQADiamondResourcesServer(
+            config=MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name=""),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        invalid_response = NeMoGymResponse(
+            id="resp_invalid",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_invalid",
+                    "content": [{"annotations": [], "text": "Answer: E", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        verify_request = MCQAVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Question?\nA: optA\nB: optB\nC: optC\nD: optD"}]},
+            response=invalid_response,
+            options=[{"A": "optA"}, {"B": "optB"}, {"C": "optC"}, {"D": "optD"}],
+            expected_answer="C",
+            grading_mode="strict_single_letter_boxed",
+        )
+        result = await server.verify(verify_request)
+
+        assert result.reward == 0.0
+        assert result.extracted_answer is None
