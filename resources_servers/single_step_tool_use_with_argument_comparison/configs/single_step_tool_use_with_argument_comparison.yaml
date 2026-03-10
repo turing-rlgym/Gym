@@ -6,6 +6,7 @@ single_step_tool_use_with_argument_comparison_resources_server:
       tool_call_comparator_config:
         word_count_similarity_threshold: 0.1
       verified: false
+      description: Conversational tool-use RL from expert trajectories; behavior cloning per step across auth, lookup, and servicing domains.
 single_step_tool_use_with_argument_comparison_agent:
   responses_api_agents:
     tool_simulation_agent:
@@ -24,6 +25,9 @@ single_step_tool_use_with_argument_comparison_agent:
         gitlab_identifier:
           dataset_name: single_step_tool_use_with_argument_comparison
           version: 0.0.1
+          artifact_fpath: train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-v1
           artifact_fpath: train.jsonl
         license: Apache 2.0
       - name: validation
