@@ -109,10 +109,6 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
         parsed data alongside the schema and converts values where possible.
         On conversion failure the original value is returned so that schema
         validation can report the error.
-
-        Note: markdown-wrapped output (```xml ... ```) is intentionally NOT stripped
-        here. The SDG instructions explicitly tell the model to output raw XML
-        without markdown fencing, so wrapping in backticks is a model error.
         """
         if not isinstance(schema, dict) or "type" not in schema:
             return data
