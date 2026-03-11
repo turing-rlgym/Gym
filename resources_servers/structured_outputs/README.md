@@ -24,6 +24,8 @@ We recommend formatting the dataset to test the model's ability to follow instru
 
 For any parsed outputs, we use the `openapi-schema-validator` library for verification.
 
+We currently have support for 3 different schema output types: JSON, YAML, and XML.
+
 > [!IMPORTANT]
 > Evaluation is only based on the **schema adherence** of the generated output.
 > **The actual content of the generation is *not* verified**, thus it is advised that the task used for prompt creation is not too difficult for the model.
