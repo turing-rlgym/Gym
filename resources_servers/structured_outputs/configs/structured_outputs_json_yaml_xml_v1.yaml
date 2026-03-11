@@ -19,26 +19,20 @@ structured_outputs_simple_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_train.jsonl
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_train.jsonl
         gitlab_identifier:
-          dataset_name: structured_outputs_251027_nano_v3_sdg_json_train
-          version: 0.0.2
-          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-instruction_following-structured_outputs
-          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_train.jsonl
+          dataset_name: structured_outputs_260309_nano_v3_sdg_json_yaml_xml
+          version: 0.0.1
+          artifact_fpath: structured_outputs_260309_nano_v3_sdg_json_yaml_xml_train.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_251027_nano_v3_sdg_json_val.jsonl
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_val.jsonl
         gitlab_identifier:
-          dataset_name: structured_outputs_251027_nano_v3_sdg_json_val
-          version: 0.0.2
-          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_val.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-instruction_following-structured_outputs
-          artifact_fpath: structured_outputs_251027_nano_v3_sdg_json_val.jsonl
+          dataset_name: structured_outputs_260309_nano_v3_sdg_json_yaml_xml
+          version: 0.0.1
+          artifact_fpath: structured_outputs_260309_nano_v3_sdg_json_yaml_xml_val.jsonl
         license: Apache 2.0
       - name: example
         type: example
-        jsonl_fpath: resources_servers/structured_outputs/data/example.jsonl
+        jsonl_fpath: resources_servers/structured_outputs/data/structured_outputs_260309_nano_v3_sdg_json_yaml_xml_example.jsonl

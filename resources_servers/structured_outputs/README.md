@@ -50,6 +50,8 @@ ng_collect_rollouts \
     +limit=1
 ```
 
+## Downloading Data
+### Version 1 [251027] (JSON only)
 You can prepare the data for training with:
 ```bash
 config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
@@ -57,6 +59,17 @@ resources_servers/structured_outputs/configs/structured_outputs_json.yaml"
 ng_prepare_data "+config_paths=[${config_paths}]" \
     +output_dirpath=data/structured_outputs \
     +mode=train_preparation +should_download=true
+```
+
+### Version 2 [260310] (JSON, YAML, XML)
+```bash
+# prepare
+export config_paths="responses_api_models/vllm_model/configs/vllm_model_for_training.yaml,\
+resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml"
+ng_prepare_data "+config_paths=[${config_paths}]" \
+    +output_dirpath=data/structured_outputs/ \
+    +mode=train_preparation \
+    +should_download=true
 ```
 
 # Testing
