@@ -116,7 +116,7 @@ genrm_compare_agent:
         jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
       - name: train
         type: train
-        jsonl_fpath: resources_servers/genrm_compare/data/train.jsonl
+        jsonl_fpath: resources_servers/genrm_compare/data/Nemotron-RL-Identity-Following-v1_train.jsonl
         huggingface_identifier:
           repo_id: nvidia/Nemotron-RL-Identity-Following-v1
           artifact_fpath: train.jsonl
